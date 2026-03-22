@@ -63,7 +63,11 @@ export default function ChatWidget() {
 
     try {
       const token = localStorage.getItem('token') || '';
-      const res   = await fetch('http://localhost:8000/api/chat', {
+      // 1. Define the base URL using the environment variable
+      const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+      // 2. Use the variable in the fetch call
+      const res = await fetch(`${API_BASE_URL}/api/chat`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body:    JSON.stringify({ message: text }),
