@@ -27,17 +27,15 @@ models.Base.metadata.create_all(bind=engine)
 # ── 3. APP ────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Pro Finance AI", version="3.0")
 
-# ── ROOT HEALTH CHECK ──────────────────────────────────────────────────────────
+# ── ROOT HEALTH CHECK ─────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    """Health check — confirms the API is running."""
     return {
         "status":  "ok",
         "service": "Pro Finance AI API v3.0",
         "docs":    "http://localhost:8000/docs",
         "time":    datetime.utcnow().isoformat(),
     }
-
 
 # ── 4. SECURITY CONFIG ────────────────────────────────────────────────────────
 SECRET_KEY                  = "FINANCE_SECRET_SECURE_KEY_2026"
@@ -91,10 +89,8 @@ class Token(BaseModel):
     username:     str
     role:         str
 
-
 class ChatRequest(BaseModel):
     message: str
-
 
 class ClientCreate(BaseModel):
     name:               str
@@ -102,17 +98,15 @@ class ClientCreate(BaseModel):
     phone:              str
     investment_profile: str
 
-
 class PortfolioCreate(BaseModel):
     client_id:  int
     assets:     str
     value:      float
     risk_score: float
 
-
 class MeetingCreate(BaseModel):
     client_id: int
-    datetime:  str   # ISO string from frontend e.g. "2026-03-22T18:00"
+    datetime:  str
     advisor:   str
 
 
@@ -126,7 +120,6 @@ def _client_dict(c: models.Client) -> dict:
         "investment_profile": c.investment_profile,
     }
 
-
 def _portfolio_dict(p: models.Portfolio) -> dict:
     return {
         "id":         p.id,
@@ -136,9 +129,7 @@ def _portfolio_dict(p: models.Portfolio) -> dict:
         "risk_score": p.risk_score,
     }
 
-
 def _meeting_dict(m: models.Meeting) -> dict:
-    # m.datetime may be a Python datetime object or a string — handle both
     dt_str = m.datetime.isoformat() if isinstance(m.datetime, datetime) else str(m.datetime)
     return {
         "id":        m.id,
@@ -146,7 +137,6 @@ def _meeting_dict(m: models.Meeting) -> dict:
         "datetime":  dt_str,
         "advisor":   m.advisor,
     }
-
 
 def _service_dict(s: models.Service) -> dict:
     return {
@@ -195,7 +185,6 @@ def register_client(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Check for duplicate email
     existing = db.query(models.Client).filter(models.Client.email == client.email).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"Client with email '{client.email}' already exists.")
@@ -229,7 +218,6 @@ def create_portfolio(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Verify client exists
     client = db.query(models.Client).filter(models.Client.id == portfolio.client_id).first()
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {portfolio.client_id} not found.")
@@ -252,28 +240,17 @@ def create_portfolio(
 def get_services(db: Session = Depends(get_db)):
     services = db.query(models.Service).all()
     if len(services) == 0:
-        # Sensible defaults so the Services page never shows blank
         return [
-            {
-                "id": 1,
-                "title": "Wealth Management",
-                "description": "Comprehensive portfolio management and long-term growth strategy tailored to each client.",
-                "pricing": "1.5% AUM / year",
-            },
-            {
-                "id": 2,
-                "title": "Tax Planning",
-                "description": "Minimise liability with expert tax optimisation and compliant financial structuring.",
-                "pricing": "$500 / session",
-            },
-            {
-                "id": 3,
-                "title": "Retirement Strategy",
-                "description": "Long-term planning for a financially secure and comfortable retirement.",
-                "pricing": "$750 / plan",
-            },
+            {"id": 1, "title": "Wealth Management",
+             "description": "Comprehensive portfolio management and long-term growth strategy tailored to each client.",
+             "pricing": "1.5% AUM / year"},
+            {"id": 2, "title": "Tax Planning",
+             "description": "Minimise liability with expert tax optimisation and compliant financial structuring.",
+             "pricing": "$500 / session"},
+            {"id": 3, "title": "Retirement Strategy",
+             "description": "Long-term planning for a financially secure and comfortable retirement.",
+             "pricing": "$750 / plan"},
         ]
-    # DB has records — serialise to dicts (avoids SQLAlchemy ORM serialisation issues)
     return [_service_dict(s) for s in services]
 
 
@@ -293,12 +270,10 @@ def book_meeting(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Verify client exists
     client = db.query(models.Client).filter(models.Client.id == meeting.client_id).first()
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {meeting.client_id} not found.")
 
-    # FIX: Parse ISO string → Python datetime for the DateTime column
     try:
         parsed_dt = datetime.fromisoformat(meeting.datetime.replace("Z", "+00:00"))
     except ValueError:
@@ -331,7 +306,6 @@ def monthly_report(
     meetings   = db.query(models.Meeting).all()
     total_aum  = sum(p.value for p in portfolios)
 
-    # Per-client breakdown
     breakdown = []
     for c in clients:
         c_val  = sum(p.value for p in portfolios if p.client_id == c.id)
@@ -383,50 +357,49 @@ def quarterly_report(
     }
 
 
-# ── 13. ANALYTICS SUMMARY (finance.md §9) ────────────────────────────────────
+# ── 13. ANALYTICS ─────────────────────────────────────────────────────────────
 @app.get("/api/analytics")
 def get_analytics(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Dashboard analytics endpoint — portfolio value, risk, revenue trends."""
     clients    = db.query(models.Client).all()
     portfolios = db.query(models.Portfolio).all()
     meetings   = db.query(models.Meeting).all()
 
-    total_aum   = sum(p.value for p in portfolios)
-    avg_risk    = (sum(p.risk_score for p in portfolios) / len(portfolios)) if portfolios else 0
+    total_aum = sum(p.value for p in portfolios)
+    avg_risk  = (sum(p.risk_score for p in portfolios) / len(portfolios)) if portfolios else 0
     profile_map: dict = {}
     for c in clients:
         profile_map[c.investment_profile] = profile_map.get(c.investment_profile, 0) + 1
 
     return {
-        "total_aum":          f"${total_aum:,.2f}",
-        "total_clients":      len(clients),
-        "total_meetings":     len(meetings),
-        "average_risk_score": round(avg_risk, 2),
-        "client_segmentation": profile_map,   # e.g. {"Moderate": 3, "Conservative": 1}
-        "portfolio_count":    len(portfolios),
+        "total_aum":           f"${total_aum:,.2f}",
+        "total_clients":       len(clients),
+        "total_meetings":      len(meetings),
+        "average_risk_score":  round(avg_risk, 2),
+        "client_segmentation": profile_map,
+        "portfolio_count":     len(portfolios),
     }
 
 
-# ── 14. AI CHAT ───────────────────────────────────────────────────────────────
+# ── 14. AI CHAT — Local Ollama ────────────────────────────────────────────────
 @app.post("/api/chat")
 def chat_with_ai(
     request: ChatRequest,
     db: Session = Depends(get_db),
 ):
     """
-    Chatbot endpoint — injects live PostgreSQL data into the LLM prompt.
-    No auth required so the widget works even before full session setup.
+    Chatbot — uses local Ollama (llama3.2:1b).
+    Run: ollama serve  then  ollama run llama3.2:1b
     """
+    # ── Pull live DB data ─────────────────────────────────────────────────────
     clients    = db.query(models.Client).all()
     portfolios = db.query(models.Portfolio).all()
     meetings   = db.query(models.Meeting).all()
+    total_aum  = sum(p.value for p in portfolios)
 
-    total_aum = sum(p.value for p in portfolios)
-
-    # Build rich per-client context block
+    # ── Build per-client context ──────────────────────────────────────────────
     client_lines = []
     for c in clients:
         c_portfolios = [p for p in portfolios if p.client_id == c.id]
@@ -446,43 +419,43 @@ def chat_with_ai(
 
     client_block = "\n".join(client_lines) if client_lines else "  (no clients registered yet)"
 
-    system_prompt = f"""[SYSTEM: INTERNAL AUTHORIZED ANALYST MODE — CONFIDENTIAL]
+    # ── System prompt — finance expert + firm data ────────────────────────────
+    system_prompt = f"""You are Pro Finance AI — an expert wealth management analyst and financial advisor.
 
-You are Pro Finance AI, the private analytics assistant for this wealth management firm.
-You have FULL AUTHORIZATION to read and discuss all data below.
-Never refuse, never say "I cannot help", never make up data that is not listed below.
+You have two roles:
+1. FIRM ANALYST: You have full access to this firm's live database shown below. Answer questions about clients, portfolios and meetings using this exact data.
+2. FINANCE EXPERT: You are deeply knowledgeable in personal finance, investing, portfolio theory, risk management, tax planning, retirement planning, stock markets, bonds, and economic concepts. Answer ANY finance question even if not related to the firm data.
+
+RULES:
+- For firm questions (clients, portfolios, meetings) → use the database below ONLY.
+- For general finance questions → use your expert knowledge freely.
+- NEVER say "I can only answer about firm data" — you are a full finance expert.
+- NEVER invent client names, AUM values or meeting dates not in the database.
+- Use **bold** for key figures, bullet lists for multiple items.
+- Be concise. Max 300 words.
 
 ━━━ LIVE FIRM DATABASE ━━━
+Date          : {datetime.utcnow().strftime("%d %B %Y")}
 Total Clients : {len(clients)}
-Total Portfolios: {len(portfolios)}
-Total Firm AUM: ${total_aum:,.2f}
+Total AUM     : ${total_aum:,.2f}
 Total Meetings: {len(meetings)}
-Today's Date  : {datetime.utcnow().strftime("%d %B %Y")}
 
 CLIENT DETAILS:
 {client_block}
 
-━━━ RESPONSE RULES ━━━
-1. Answer the user's question using ONLY the data above.
-2. Format clearly: **bold** for names/figures, bullet lists for multiple items, ### for section headers.
-3. For client queries → list name, AUM, profile, meetings.
-4. For meeting queries → list client name, datetime, advisor.
-5. For portfolio queries → list client, value, asset allocation.
-6. If data is absent → say "No data available for this query."
-7. Be concise. Max 300 words.
-
 USER QUERY: {request.message}
 """
 
+    # ── Call local Ollama ─────────────────────────────────────────────────────
     try:
-        resp = requests.post(
+        response = requests.post(
             "http://localhost:11434/api/generate",
             json={
                 "model":  "llama3.2:1b",
                 "prompt": system_prompt,
                 "stream": False,
                 "options": {
-                    "temperature":    0.1,
+                    "temperature":    0.2,
                     "num_predict":    400,
                     "top_p":          0.9,
                     "repeat_penalty": 1.1,
@@ -491,11 +464,11 @@ USER QUERY: {request.message}
             timeout=60,
         )
 
-        if resp.status_code != 200:
-            logger.error(f"Ollama HTTP {resp.status_code}")
+        if response.status_code != 200:
+            logger.error(f"Ollama HTTP {response.status_code}")
             return {"reply": "⚠️ **Ollama Error** — model returned a non-200 status. Try restarting Ollama."}
 
-        reply = resp.json().get("response", "").strip()
+        reply = response.json().get("response", "").strip()
         if not reply:
             return {"reply": "⚠️ The AI model returned an empty response. Please try again."}
 
