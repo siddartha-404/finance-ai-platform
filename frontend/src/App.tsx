@@ -223,10 +223,17 @@ const DashboardHome: React.FC = () => {
   const [reportData,  setReportData]  = useState<any>(null);
   const [showReport,  setShowReport]  = useState(false);
 
-  useEffect(() => {
+  const fetchClientCount = useCallback(() => {
     apiFetch('http://localhost:8000/api/clients')
       .then(r => r.json()).then(d => setClientCount(Array.isArray(d) ? d.length : 0)).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetchClientCount();
+    const handleUpdate = () => fetchClientCount();
+    window.addEventListener('db-updated', handleUpdate);
+    return () => window.removeEventListener('db-updated', handleUpdate);
+  }, [fetchClientCount]);
 
   const fetchReport = (type: 'monthly' | 'quarterly') => {
     apiFetch(`http://localhost:8000/api/reports/${type}`)
@@ -345,7 +352,7 @@ const DashboardHome: React.FC = () => {
             </div>
             <div className="space-y-3 mb-8 relative z-10">
               <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">
-                {isQ ? 'Quarterly Strategy Insights' : 'Risk Analysis'}
+                {isQ ? 'Quarterly Strategy Insights' : 'Risk Analysis'} 
               </h4>
               {items.map((item, idx) => (
                 <div key={idx} className="flex items-start gap-3 text-sm text-slate-300">
@@ -380,7 +387,13 @@ const ClientsPage: React.FC = () => {
       .then(r => r.json()).then(d => setClients(Array.isArray(d) ? d : [])).catch(() => {});
   }, []);
 
-  useEffect(() => { loadClients(); }, [loadClients]);
+  // NEW: Added Event Listener for AI Chatbot Updates
+  useEffect(() => { 
+    loadClients(); 
+    const handleUpdate = () => loadClients();
+    window.addEventListener('db-updated', handleUpdate);
+    return () => window.removeEventListener('db-updated', handleUpdate);
+  }, [loadClients]);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -500,7 +513,13 @@ const PortfoliosPage: React.FC = () => {
     apiFetch('http://localhost:8000/api/portfolios').then(r => r.json()).then(d => setPortfolios(Array.isArray(d) ? d : [])).catch(() => {});
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  // NEW: Added Event Listener for AI Chatbot Updates
+  useEffect(() => { 
+    loadData(); 
+    const handleUpdate = () => loadData();
+    window.addEventListener('db-updated', handleUpdate);
+    return () => window.removeEventListener('db-updated', handleUpdate);
+  }, [loadData]);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -631,7 +650,13 @@ const MeetingsPage: React.FC = () => {
     apiFetch('http://localhost:8000/api/meetings').then(r => r.json()).then(d => setMeetings(Array.isArray(d) ? d : [])).catch(() => {});
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  // NEW: Added Event Listener for AI Chatbot Updates
+  useEffect(() => { 
+    loadData(); 
+    const handleUpdate = () => loadData();
+    window.addEventListener('db-updated', handleUpdate);
+    return () => window.removeEventListener('db-updated', handleUpdate);
+  }, [loadData]);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

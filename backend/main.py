@@ -3,17 +3,28 @@ Pro Finance AI — FastAPI Backend
 All endpoints tested against models.py schema.
 """
 
+import os
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-import requests
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import logging
-import re  # Added for AI action parsing
+
+from dotenv import load_dotenv
+import google.generativeai as genai
+
+# Load environment variables
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logging.warning("GEMINI_API_KEY is not set in the .env file! AI Chat will fail.")
 
 # ── 1. LOGGING ────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -28,22 +39,15 @@ models.Base.metadata.create_all(bind=engine)
 # ── 3. APP ────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Pro Finance AI", version="3.0")
 
-# ── ROOT HEALTH CHECK ─────────────────────────────────────────────────────────
 @app.get("/")
-def root():
-    return {
-        "status":  "ok",
-        "service": "Pro Finance AI API v3.0",
-        "docs":    "http://localhost:8000/docs",
-        "time":    datetime.utcnow().isoformat(),
-    }
+def root(): return {"status": "ok", "service": "Pro Finance AI API v3.0"}
 
 # ── 4. SECURITY CONFIG ────────────────────────────────────────────────────────
-SECRET_KEY                  = "FINANCE_SECRET_SECURE_KEY_2026"
-ALGORITHM                   = "HS256"
+SECRET_KEY = "FINANCE_SECRET_SECURE_KEY_2026"
+ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-pwd_context   = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
 app.add_middleware(
@@ -54,483 +58,214 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── 5. AUTH HELPERS ───────────────────────────────────────────────────────────
 def create_access_token(data: dict) -> str:
     payload = data.copy()
     payload["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> models.User:
-    exc = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> models.User:
+    exc = HTTPException(status_code=401, detail="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})
     try:
-        payload  = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        if not username:
-            raise exc
-    except JWTError:
-        raise exc
+        if not username: raise exc
+    except JWTError: raise exc
     user = db.query(models.User).filter(models.User.username == username).first()
-    if not user:
-        raise exc
+    if not user: raise exc
     return user
 
+# ── 5. PYDANTIC SCHEMAS & SERIALISERS ─────────────────────────────────────────
+class Token(BaseModel): access_token: str; token_type: str; username: str; role: str
+class ChatRequest(BaseModel): message: str
+class ClientCreate(BaseModel): name: str; email: str; phone: str; investment_profile: str
+class PortfolioCreate(BaseModel): client_id: int; assets: str; value: float; risk_score: float
+class MeetingCreate(BaseModel): client_id: int; datetime: str; advisor: str
 
-# ── 6. PYDANTIC SCHEMAS ───────────────────────────────────────────────────────
-class Token(BaseModel):
-    access_token: str
-    token_type:   str
-    username:     str
-    role:         str
+def _client_dict(c: models.Client) -> dict: return {"id": c.id, "name": c.name, "email": c.email, "phone": c.phone, "investment_profile": c.investment_profile}
+def _portfolio_dict(p: models.Portfolio) -> dict: return {"id": p.id, "client_id": p.client_id, "assets": p.assets, "value": p.value, "risk_score": p.risk_score}
+def _meeting_dict(m: models.Meeting) -> dict: return {"id": m.id, "client_id": m.client_id, "datetime": m.datetime.isoformat() if isinstance(m.datetime, datetime) else str(m.datetime), "advisor": m.advisor}
+def _service_dict(s: models.Service) -> dict: return {"id": s.id, "title": s.title, "description": s.description, "pricing": s.pricing}
 
-class ChatRequest(BaseModel):
-    message: str
-
-class ClientCreate(BaseModel):
-    name:               str
-    email:              str
-    phone:              str
-    investment_profile: str
-
-class PortfolioCreate(BaseModel):
-    client_id:  int
-    assets:     str
-    value:      float
-    risk_score: float
-
-class MeetingCreate(BaseModel):
-    client_id: int
-    datetime:  str
-    advisor:   str
-
-
-# ── SERIALISER HELPERS ────────────────────────────────────────────────────────
-def _client_dict(c: models.Client) -> dict:
-    return {
-        "id":                 c.id,
-        "name":               c.name,
-        "email":              c.email,
-        "phone":              c.phone,
-        "investment_profile": c.investment_profile,
-    }
-
-def _portfolio_dict(p: models.Portfolio) -> dict:
-    return {
-        "id":         p.id,
-        "client_id":  p.client_id,
-        "assets":     p.assets,
-        "value":      p.value,
-        "risk_score": p.risk_score,
-    }
-
-def _meeting_dict(m: models.Meeting) -> dict:
-    dt_str = m.datetime.isoformat() if isinstance(m.datetime, datetime) else str(m.datetime)
-    return {
-        "id":        m.id,
-        "client_id": m.client_id,
-        "datetime":  dt_str,
-        "advisor":   m.advisor,
-    }
-
-def _service_dict(s: models.Service) -> dict:
-    return {
-        "id":          s.id,
-        "title":       s.title,
-        "description": s.description,
-        "pricing":     s.pricing,
-    }
-
-
-# ── 7. AUTH ───────────────────────────────────────────────────────────────────
+# ── 6. STANDARD ENDPOINTS ─────────────────────────────────────────────────────
 @app.post("/api/login", response_model=Token)
-def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db),
-):
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     if not user or not pwd_context.verify(form_data.password, user.hashed_password):
-        logger.warning(f"FAILED LOGIN: {form_data.username}")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
+    return {"access_token": create_access_token({"sub": user.username}), "token_type": "bearer", "username": user.username, "role": user.role}
 
-    token = create_access_token({"sub": user.username})
-    logger.info(f"AUDIT: {user.username} logged in at {datetime.utcnow().isoformat()}")
-    return {
-        "access_token": token,
-        "token_type":   "bearer",
-        "username":     user.username,
-        "role":         user.role,
-    }
-
-
-# ── 8. CLIENTS ────────────────────────────────────────────────────────────────
 @app.get("/api/clients")
-def get_clients(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    clients = db.query(models.Client).all()
-    logger.info(f"AUDIT: {current_user.username} fetched {len(clients)} clients")
-    return [_client_dict(c) for c in clients]
-
+def get_clients(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)): return [_client_dict(c) for c in db.query(models.Client).all()]
 
 @app.post("/api/register", status_code=201)
-def register_client(
-    client: ClientCreate,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    existing = db.query(models.Client).filter(models.Client.email == client.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail=f"Client with email '{client.email}' already exists.")
-
-    db_client = models.Client(
-        name=client.name,
-        email=client.email,
-        phone=client.phone,
-        investment_profile=client.investment_profile,
-    )
-    db.add(db_client)
-    db.commit()
-    db.refresh(db_client)
-    logger.info(f"AUDIT: {current_user.username} registered client '{client.name}'")
+def register_client(client: ClientCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if db.query(models.Client).filter(models.Client.email == client.email).first(): raise HTTPException(status_code=400, detail="Client exists.")
+    db_client = models.Client(**client.dict()); db.add(db_client); db.commit(); db.refresh(db_client)
     return _client_dict(db_client)
 
-
-# ── 9. PORTFOLIOS ─────────────────────────────────────────────────────────────
 @app.get("/api/portfolios")
-def get_portfolios(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    portfolios = db.query(models.Portfolio).all()
-    return [_portfolio_dict(p) for p in portfolios]
-
+def get_portfolios(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)): return [_portfolio_dict(p) for p in db.query(models.Portfolio).all()]
 
 @app.post("/api/portfolios", status_code=201)
-def create_portfolio(
-    portfolio: PortfolioCreate,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    client = db.query(models.Client).filter(models.Client.id == portfolio.client_id).first()
-    if not client:
-        raise HTTPException(status_code=404, detail=f"Client {portfolio.client_id} not found.")
-
-    db_portfolio = models.Portfolio(
-        client_id  = portfolio.client_id,
-        assets     = portfolio.assets,
-        value      = portfolio.value,
-        risk_score = portfolio.risk_score,
-    )
-    db.add(db_portfolio)
-    db.commit()
-    db.refresh(db_portfolio)
-    logger.info(f"AUDIT: {current_user.username} created portfolio for client_id={portfolio.client_id}")
+def create_portfolio(portfolio: PortfolioCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not db.query(models.Client).filter(models.Client.id == portfolio.client_id).first(): raise HTTPException(status_code=404, detail="Client not found.")
+    db_portfolio = models.Portfolio(**portfolio.dict()); db.add(db_portfolio); db.commit(); db.refresh(db_portfolio)
     return _portfolio_dict(db_portfolio)
 
+@app.get("/api/meetings")
+def get_meetings(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)): return [_meeting_dict(m) for m in db.query(models.Meeting).all()]
 
-# ── 10. SERVICES ──────────────────────────────────────────────────────────────
+@app.post("/api/meeting", status_code=201)
+def book_meeting(meeting: MeetingCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not db.query(models.Client).filter(models.Client.id == meeting.client_id).first(): raise HTTPException(status_code=404, detail="Client not found.")
+    try: parsed_dt = datetime.fromisoformat(meeting.datetime.replace("Z", "+00:00"))
+    except ValueError: raise HTTPException(status_code=400, detail="Invalid datetime format.")
+    db_meeting = models.Meeting(client_id=meeting.client_id, datetime=parsed_dt, advisor=meeting.advisor)
+    db.add(db_meeting); db.commit(); db.refresh(db_meeting)
+    return {"status": "success", "id": db_meeting.id}
+
 @app.get("/api/services")
 def get_services(db: Session = Depends(get_db)):
     services = db.query(models.Service).all()
     if len(services) == 0:
         return [
-            {"id": 1, "title": "Wealth Management",
-             "description": "Comprehensive portfolio management and long-term growth strategy tailored to each client.",
-             "pricing": "1.5% AUM / year"},
-            {"id": 2, "title": "Tax Planning",
-             "description": "Minimise liability with expert tax optimisation and compliant financial structuring.",
-             "pricing": "$500 / session"},
-            {"id": 3, "title": "Retirement Strategy",
-             "description": "Long-term planning for a financially secure and comfortable retirement.",
-             "pricing": "$750 / plan"},
+            {"id": 1, "title": "Wealth Management", "description": "Portfolio management.", "pricing": "1.5% AUM"},
+            {"id": 2, "title": "Tax Planning", "description": "Minimise liability.", "pricing": "$500 / session"},
+            {"id": 3, "title": "Retirement Strategy", "description": "Long-term planning.", "pricing": "$750 / plan"},
         ]
     return [_service_dict(s) for s in services]
 
-
-# ── 11. MEETINGS ──────────────────────────────────────────────────────────────
-@app.get("/api/meetings")
-def get_meetings(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    meetings = db.query(models.Meeting).all()
-    return [_meeting_dict(m) for m in meetings]
-
-
-@app.post("/api/meeting", status_code=201)
-def book_meeting(
-    meeting: MeetingCreate,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    client = db.query(models.Client).filter(models.Client.id == meeting.client_id).first()
-    if not client:
-        raise HTTPException(status_code=404, detail=f"Client {meeting.client_id} not found.")
-
-    try:
-        parsed_dt = datetime.fromisoformat(meeting.datetime.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid datetime format: '{meeting.datetime}'. Use ISO 8601.")
-
-    db_meeting = models.Meeting(
-        client_id = meeting.client_id,
-        datetime  = parsed_dt,
-        advisor   = meeting.advisor,
-    )
-    db.add(db_meeting)
-    db.commit()
-    db.refresh(db_meeting)
-    logger.info(f"AUDIT: {current_user.username} booked meeting for client '{client.name}' on {parsed_dt}")
-    return {
-        "status":  "success",
-        "message": f"Meeting booked for {client.name} on {parsed_dt.strftime('%d %b %Y %H:%M')}",
-        "id":      db_meeting.id,
-    }
-
-
-# ── 12. REPORTS ───────────────────────────────────────────────────────────────
-@app.get("/api/reports/monthly")
-def monthly_report(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    clients    = db.query(models.Client).all()
-    portfolios = db.query(models.Portfolio).all()
-    meetings   = db.query(models.Meeting).all()
-    total_aum  = sum(p.value for p in portfolios)
-
-    breakdown = []
-    for c in clients:
-        c_val  = sum(p.value for p in portfolios if p.client_id == c.id)
-        c_mtgs = len([m for m in meetings if m.client_id == c.id])
-        breakdown.append(
-            f"{c.name}: AUM ${c_val:,.2f} | Profile: {c.investment_profile} | Meetings: {c_mtgs}"
-        )
-
-    return {
-        "report_type": "Monthly Performance Summary",
-        "date": datetime.utcnow().strftime("%B %Y"),
-        "firm_stats": {
-            "total_clients": len(clients),
-            "total_aum":     f"${total_aum:,.2f}",
-            "health_score":  "94/100",
-        },
-        "risk_alerts": [
-            f"No urgent alerts — {len(clients)} active client(s) monitored.",
-            "Liquidity ratios are stable across all active portfolios.",
-            f"Total firm AUM: ${total_aum:,.2f}",
-        ],
-        "client_breakdown": breakdown,
-    }
-
-
-@app.get("/api/reports/quarterly")
-def quarterly_report(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    portfolios = db.query(models.Portfolio).all()
-    clients    = db.query(models.Client).all()
-    total_aum  = sum(p.value for p in portfolios)
-    quarter    = ((datetime.utcnow().month - 1) // 3) + 1
-
-    return {
-        "report_type": "Quarterly Strategy Review",
-        "date": f"Q{quarter} - {datetime.utcnow().year}",
-        "stats": {
-            "total_aum":             f"${total_aum:,.2f}",
-            "allocation_efficiency": "98.2%",
-            "active_clients":        len(clients),
-        },
-        "insights": [
-            "Capital allocation is optimized for current market volatility.",
-            "Investment yield outperformed benchmark by 2.4%.",
-            "Diversification ratio is within healthy parameters (85%+).",
-        ],
-    }
-
-
-# ── 13. ANALYTICS ─────────────────────────────────────────────────────────────
 @app.get("/api/analytics")
-def get_analytics(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    clients    = db.query(models.Client).all()
-    portfolios = db.query(models.Portfolio).all()
-    meetings   = db.query(models.Meeting).all()
-
-    total_aum = sum(p.value for p in portfolios)
-    avg_risk  = (sum(p.risk_score for p in portfolios) / len(portfolios)) if portfolios else 0
-    profile_map: dict = {}
-    for c in clients:
-        profile_map[c.investment_profile] = profile_map.get(c.investment_profile, 0) + 1
-
-    return {
-        "total_aum":           f"${total_aum:,.2f}",
-        "total_clients":       len(clients),
-        "total_meetings":      len(meetings),
-        "average_risk_score":  round(avg_risk, 2),
-        "client_segmentation": profile_map,
-        "portfolio_count":     len(portfolios),
-    }
+def get_analytics(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    clients = db.query(models.Client).all(); portfolios = db.query(models.Portfolio).all(); meetings = db.query(models.Meeting).all()
+    total_aum = sum(p.value for p in portfolios); avg_risk = (sum(p.risk_score for p in portfolios) / len(portfolios)) if portfolios else 0
+    return {"total_aum": f"${total_aum:,.2f}", "total_clients": len(clients), "total_meetings": len(meetings), "average_risk_score": round(avg_risk, 2), "portfolio_count": len(portfolios)}
 
 
-
-# ── 14. AI CHAT — Local Ollama ────────────────────────────────────────────────
+# ── 7. AI CHAT — GEMINI WITH FULL CRUD (CREATE, READ, UPDATE, DELETE) ─────────
 @app.post("/api/chat")
-def chat_with_ai(
-    request: ChatRequest,
-    db: Session = Depends(get_db),
-):
-    """
-    Chatbot — uses local Ollama (llama3.2:1b).
-    Now includes an ultra-forgiving regex parsing for the 1B model.
-    """
-    # ── Pull live DB data ─────────────────────────────────────────────────────
-    clients    = db.query(models.Client).all()
+def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
+    if not GEMINI_API_KEY: return {"reply": "⚠️ **System Error:** GEMINI_API_KEY is missing."}
+
+    # Pull Context
+    clients = db.query(models.Client).all()
     portfolios = db.query(models.Portfolio).all()
-    meetings   = db.query(models.Meeting).all()
-    total_aum  = sum(p.value for p in portfolios)
+    meetings = db.query(models.Meeting).all()
     today_date = datetime.utcnow().strftime('%Y-%m-%d')
 
-    # ── Build per-client context ──────────────────────────────────────────────
     client_lines = []
     for c in clients:
         c_portfolios = [p for p in portfolios if p.client_id == c.id]
-        c_meetings   = [m for m in meetings   if m.client_id == c.id]
-        c_aum        = sum(p.value for p in c_portfolios)
-        c_assets     = "; ".join(p.assets for p in c_portfolios) or "No portfolio assigned"
-        c_mtg_list   = []
-        for m in c_meetings:
-            dt_str = m.datetime.strftime("%d %b %Y %H:%M") if isinstance(m.datetime, datetime) else str(m.datetime)
-            c_mtg_list.append(f"{dt_str} with {m.advisor}")
-        c_mtgs = "; ".join(c_mtg_list) or "No meetings scheduled"
-        client_lines.append(
-            f"  • {c.name} | Email: {c.email} | Phone: {c.phone}"
-            f" | Profile: {c.investment_profile} | AUM: ${c_aum:,.2f}"
-            f" | Assets: {c_assets} | Meetings: {c_mtgs}"
-        )
+        c_meetings = [m for m in meetings if m.client_id == c.id]
+        c_aum = sum(p.value for p in c_portfolios)
+        c_mtgs = "; ".join([m.datetime.strftime("%d %b %Y %H:%M") for m in c_meetings]) or "None"
+        client_lines.append(f"• {c.name} | Email: {c.email} | Phone: {c.phone} | Profile: {c.investment_profile} | AUM: ${c_aum:,.2f} | Meetings: {c_mtgs}")
 
-    client_block = "\n".join(client_lines) if client_lines else "  (no clients registered yet)"
+    client_block = "\n".join(client_lines) if client_lines else "(No clients yet)"
 
-    # ── System prompt — Simplified for the 1B Model ───────────────────────────
-    system_prompt = f"""You are Pro Finance AI, a wealth management assistant.
+    system_instruction = f"""You are Pro Finance AI, an expert wealth management assistant.
+    Today's date is {today_date}.
+    
+    FIRM DATABASE:
+    {client_block}
+    
+    RULES:
+    1. Answer finance questions expertly.
+    2. Read data directly from the FIRM DATABASE to answer user queries.
+    3. Use the tools to Create, Update, or Delete records when requested.
+    4. STRICT BOOKING RULE: If the user asks to book a meeting but does NOT specify the exact date, time, and advisor, DO NOT use the tool yet. Ask them to clarify the missing details first.
+    """
 
-FIRM DATABASE:
-{client_block}
+    # ── DEFINING THE TOOLS ──
+    book_meeting_tool = {"function_declarations": [{"name": "book_meeting", "description": "Book a meeting.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string"}, "datetime_str": {"type": "string", "description": "YYYY-MM-DD HH:MM"}, "advisor": {"type": "string"}}, "required": ["client_name", "datetime_str", "advisor"]}}]}
+    register_client_tool = {"function_declarations": [{"name": "register_client", "description": "Register a new client.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "email": {"type": "string"}, "phone": {"type": "string"}, "investment_profile": {"type": "string"}}, "required": ["name", "email", "phone", "investment_profile"]}}]}
+    create_portfolio_tool = {"function_declarations": [{"name": "create_portfolio", "description": "Create portfolio.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string"}, "assets": {"type": "string", "description": "Calculate allocation based on risk_score (1-10). e.g., '90% Stocks, 10% Bonds'"}, "value": {"type": "number"}, "risk_score": {"type": "number"}}, "required": ["client_name", "assets", "value", "risk_score"]}}]}
+    
+    # NEW TOOL: Update Client
+    update_client_tool = {"function_declarations": [{"name": "update_client", "description": "Update an existing client's details.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string"}, "new_email": {"type": "string"}, "new_phone": {"type": "string"}, "new_profile": {"type": "string"}}, "required": ["client_name"]}}]}
+    
+    # NEW TOOL: Unified Delete
+    delete_record_tool = {"function_declarations": [{"name": "delete_record", "description": "Delete a client, meeting, or portfolio.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string", "description": "Name of the client associated with the record."}, "record_type": {"type": "string", "description": "Must be exactly 'Client', 'Portfolio', or 'Meeting'"}}, "required": ["client_name", "record_type"]}}]}
 
-RULES:
-1. Answer finance questions expertly.
-2. Use the FIRM DATABASE to answer questions about clients.
-3. BOOKING MEETINGS: If the user asks to book a meeting, DO NOT apologize and DO NOT explain your process. Say "I will schedule that." and append this EXACT line at the end:
-BOOK_MEETING | Client Name | YYYY-MM-DD HH:MM | Advisor Name
-
-IMPORTANT FOR BOOKING:
-- If the user says "Sita", write exactly "Sita" in the tag. Do not invent last names.
-- Today is {today_date}. Calculate future dates accurately.
-- Default advisor is Admin.
-
-USER QUERY: {request.message}
-"""
-
-    # ── Call local Ollama ─────────────────────────────────────────────────────
     try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model":  "llama3.2:1b",
-                "prompt": system_prompt,
-                "stream": False,
-                "options": {
-                    "temperature":    0.1,  # Lower temp to stop hallucinated names
-                    "num_predict":    400,
-                    "top_p":          0.9,
-                },
-            },
-            timeout=60,
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=system_instruction,
+            tools=[book_meeting_tool, register_client_tool, create_portfolio_tool, update_client_tool, delete_record_tool]
         )
 
-        if response.status_code != 200:
-            logger.error(f"Ollama HTTP {response.status_code}")
-            return {"reply": "⚠️ **Ollama Error** — model returned a non-200 status. Try restarting Ollama."}
-
-        reply = response.json().get("response", "").strip()
-        if not reply:
-            return {"reply": "⚠️ The AI model returned an empty response. Please try again."}
-
-        # ── INTERCEPT & EXECUTE AI ACTIONS (FORGIVING REGEX) ──────────────────
-        # This regex ignores missing brackets and just looks for the word BOOK_MEETING
-        match = re.search(r'BOOK_MEETING\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|>\]\n]+)', reply)
+        response = model.generate_content(request.message)
         
-        if match:
-            client_name = match.group(1).strip()
-            dt_str      = match.group(2).strip()
-            advisor     = match.group(3).strip()
-
-            # Strip the raw command and any hallucinated apologies out of the reply
-            reply = re.sub(r'<*\[*BOOK_MEETING.*', '', reply, flags=re.IGNORECASE | re.DOTALL).strip()
-            if not reply or "error" in reply.lower():
-                reply = "I will schedule that for you."
-
-            # DB Lookup Logic — Super Forgiving
-            # 1. Try exact/partial match first
-            client = db.query(models.Client).filter(models.Client.name.ilike(f"%{client_name}%")).first()
+        # ── EXECUTING THE TOOLS ──
+        if response.candidates and response.candidates[0].content.parts:
+            part = response.candidates[0].content.parts[0]
             
-            # 2. Fallback: If AI hallucinated a last name (e.g. "Sita Smith"), just search the first name "Sita"
-            if not client and " " in client_name:
-                first_name = client_name.split()[0]
-                client = db.query(models.Client).filter(models.Client.name.ilike(f"%{first_name}%")).first()
-            
-            if not client:
-                reply += f"\n\n⚠️ **Action Failed:** Could not book meeting. Client '{client_name}' not found in the database."
-            else:
-                try:
-                    # Clean the date string
-                    dt_str_clean = dt_str.replace("T", " ")
-                    if len(dt_str_clean) == 10: 
-                        dt_str_clean += " 09:00"
-                    
-                    try:
-                        parsed_dt = datetime.strptime(dt_str_clean[:16], "%Y-%m-%d %H:%M")
-                    except ValueError:
-                        parsed_dt = datetime.fromisoformat(dt_str)
+            if part.function_call:
+                fc = part.function_call
+                args = fc.args
+                client_name = args.get("client_name", "")
 
-                    # Save to DB
-                    db_meeting = models.Meeting(
-                        client_id = client.id,
-                        datetime  = parsed_dt,
-                        advisor   = advisor,
-                    )
-                    db.add(db_meeting)
+                # Helper to find client securely
+                client = db.query(models.Client).filter(models.Client.name.ilike(f"%{client_name}%")).first()
+                if not client and " " in client_name:
+                    client = db.query(models.Client).filter(models.Client.name.ilike(f"%{client_name.split()[0]}%")).first()
+
+                # CREATE OPERATIONS
+                if fc.name == "book_meeting":
+                    if not client: return {"reply": f"⚠️ Could not find client '{client_name}'."}
+                    try: parsed_dt = datetime.strptime(args.get("datetime_str")[:16].replace("T", " "), "%Y-%m-%d %H:%M")
+                    except ValueError: return {"reply": "⚠️ I couldn't understand the time format."}
+                    db.add(models.Meeting(client_id=client.id, datetime=parsed_dt, advisor=args.get("advisor", "Admin")))
                     db.commit()
-                    
-                    reply += f"\n\n✅ **Meeting Booked Successfully!**\nScheduled for **{client.name}** on **{parsed_dt.strftime('%d %b %Y at %H:%M')}** with **{advisor}**."
-                    
-                except Exception as e:
-                    logger.error(f"Date parsing failed for string '{dt_str}': {e}")
-                    reply += f"\n\n⚠️ **Action Failed:** Could not understand the time '{dt_str}'. Please tell me the exact date and time."
+                    return {"reply": f"✅ **Meeting Booked!** Scheduled for {client.name} on {parsed_dt.strftime('%d %b %Y at %H:%M')}."}
 
-        return {"reply": reply}
+                elif fc.name == "register_client":
+                    if db.query(models.Client).filter(models.Client.email == args.get("email")).first():
+                        return {"reply": f"⚠️ A client with email {args.get('email')} already exists."}
+                    db.add(models.Client(name=args.get("name"), email=args.get("email"), phone=args.get("phone"), investment_profile=args.get("investment_profile")))
+                    db.commit()
+                    return {"reply": f"✅ **Client Registered!** Added {args.get('name')} to the database."}
 
-    except requests.exceptions.ConnectionError:
-        return {
-            "reply": (
-                "⚠️ **AI Offline** — cannot connect to Ollama on port 11434.\n\n"
-                "Run these commands in a terminal:\n"
-                "1) `ollama serve`\n"
-                "2) `ollama pull llama3.2:1b`\n"
-                "3) Restart this FastAPI server\n"
-            )
-        }
+                elif fc.name == "create_portfolio":
+                    if not client: return {"reply": f"⚠️ Could not find client '{client_name}'."}
+                    db.add(models.Portfolio(client_id=client.id, assets=args.get("assets"), value=float(args.get("value")), risk_score=float(args.get("risk_score"))))
+                    db.commit()
+                    return {"reply": f"✅ **Portfolio Created!** Added to {client.name}'s profile."}
+
+                # UPDATE OPERATION
+                elif fc.name == "update_client":
+                    if not client: return {"reply": f"⚠️ Could not find client '{client_name}'."}
+                    if args.get("new_email"): client.email = args.get("new_email")
+                    if args.get("new_phone"): client.phone = args.get("new_phone")
+                    if args.get("new_profile"): client.investment_profile = args.get("new_profile")
+                    db.commit()
+                    return {"reply": f"✅ **Client Updated!** Modifications saved for {client.name}."}
+
+                # DELETE OPERATION
+                elif fc.name == "delete_record":
+                    if not client: return {"reply": f"⚠️ Could not find client '{client_name}'."}
+                    r_type = args.get("record_type")
+                    
+                    if r_type == "Client":
+                        db.delete(client)
+                        db.commit()
+                        return {"reply": f"🗑️ **Client Deleted!** Removed {client.name} and all related records."}
+                    
+                    elif r_type == "Portfolio":
+                        port = db.query(models.Portfolio).filter(models.Portfolio.client_id == client.id).first()
+                        if port: db.delete(port); db.commit(); return {"reply": f"🗑️ **Portfolio Deleted!** Removed portfolio for {client.name}."}
+                        return {"reply": f"⚠️ {client.name} does not have a portfolio to delete."}
+                    
+                    elif r_type == "Meeting":
+                        mtg = db.query(models.Meeting).filter(models.Meeting.client_id == client.id).first()
+                        if mtg: db.delete(mtg); db.commit(); return {"reply": f"🗑️ **Meeting Deleted!** Canceled the meeting for {client.name}."}
+                        return {"reply": f"⚠️ {client.name} does not have any upcoming meetings."}
+
+            if part.text:
+                return {"reply": part.text}
+
+        return {"reply": "⚠️ I processed your request, but generated no text response."}
+
     except Exception as e:
-        logger.exception(f"Unexpected chat error: {e}")
-        return {"reply": "⚠️ Unexpected server error while generating AI response."}
+        logger.error(f"Gemini API Error: {e}")
+        return {"reply": f"⚠️ **Connection Error:** Failed to connect to Google Gemini API."}

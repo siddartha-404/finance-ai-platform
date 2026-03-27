@@ -10,16 +10,10 @@ import ReactMarkdown from 'react-markdown';
 // ─── Types ────────────────────────────────────────────────────
 interface Message {
   id:        string;
-  type:      'ai' | 'user' | 'service-card' | 'thinking';
+  type:      'ai' | 'user' | 'thinking';
   content?:  string;
   resolved?: boolean;
   attachment?: { name: string; type: string };
-  serviceCard?: {
-    title:     string;
-    riskLevel: string;
-    riskColor: string;
-    buttons:   { label: string; action: string }[];
-  };
 }
 
 // ─── Web Speech API shim ──────────────────────────────────────
@@ -287,7 +281,7 @@ export default function ChatWidget() {
       const token      = localStorage.getItem('token') || '';
       const controller = new AbortController();
       
-      // Increased timeout to 150 seconds per your request
+      // Increased timeout to 150 seconds
       const tid        = setTimeout(() => controller.abort(), 150000); 
       
       const res = await fetch('http://localhost:8000/api/chat', {
@@ -307,15 +301,11 @@ export default function ChatWidget() {
         { id: thinkId, type: 'ai', content: reply },
       ]);
 
-      if (text.toLowerCase().includes('portfolio')) {
-        setTimeout(() => setMessages(prev => [...prev, {
-          id: Date.now().toString(), type: 'service-card',
-          serviceCard: {
-            title: 'Premium Wealth Management', riskLevel: 'Moderate', riskColor: '#f59e0b',
-            buttons: [{ label: 'View Portfolio', action: 'view' }, { label: 'Book Meeting', action: 'meeting' }],
-          },
-        }]), 400);
+      // NEW: Dispatch event to trigger frontend reload if AI confirms action
+      if (reply.includes('✅') || reply.includes('🗑️')) {
+        window.dispatchEvent(new Event('db-updated'));
       }
+
     } catch (err: any) {
       const isTimeout = err?.name === 'AbortError';
       setMessages(prev => [
@@ -323,7 +313,7 @@ export default function ChatWidget() {
         {
           id: thinkId, type: 'ai',
           content: isTimeout
-            ? '⚠️ **AI is taking too long.**\n\nTry:\n- Ask a shorter question\n- Upload a smaller file\n- Run `ollama run llama3.2:1b` in terminal'
+            ? '⚠️ **AI is taking too long.**\n\nTry:\n- Ask a shorter question\n- Upload a smaller file'
             : '⚠️ **Connection Error** — ensure the backend is running on port 8000.',
         },
       ]);
@@ -372,25 +362,6 @@ export default function ChatWidget() {
             {messages.map(m => {
               if (m.type === 'thinking' && !m.resolved) return <ThinkingBubble key={m.id} />;
               if (m.type === 'thinking') return null;
-
-              if (m.type === 'service-card' && m.serviceCard) {
-                const sc = m.serviceCard;
-                return (
-                  <div key={m.id} className="cw-sc-row">
-                    <div className="cw-sc-card">
-                      <p className="cw-sc-title">{sc.title}</p>
-                      <span className="cw-sc-badge" style={{ background: `${sc.riskColor}22`, color: sc.riskColor }}>
-                        {sc.riskLevel} Risk
-                      </span>
-                      <div className="cw-sc-buttons">
-                        {sc.buttons.map(btn => (
-                          <button key={btn.action} type="button" className="cw-sc-btn">{btn.label}</button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
 
               const isUser = m.type === 'user';
               return (
@@ -605,17 +576,6 @@ export default function ChatWidget() {
           padding:.25rem .5rem; margin-bottom:.4rem;
           font-size:.72rem; font-weight:600; color:#fff; width:fit-content;
         }
-
-        /* Service card */
-        .cw-sc-row  { display:flex; }
-        .cw-sc-card {
-          background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.1);
-          border-radius:1rem; padding:.875rem 1rem; max-width:90%;
-        }
-        .cw-sc-title   { color:#fff; font-weight:700; font-size:.8rem; margin:0 0 .35rem; }
-        .cw-sc-badge   { font-size:.7rem; font-weight:700; padding:.2rem .6rem; border-radius:999px; display:inline-block; margin-bottom:.7rem; }
-        .cw-sc-buttons { display:flex; gap:.5rem; flex-wrap:wrap; }
-        .cw-sc-btn     { background:rgba(16,185,129,.15); border:1px solid rgba(16,185,129,.3); color:#10b981; font-size:.72rem; font-weight:600; padding:.35rem .75rem; border-radius:.5rem; cursor:pointer; }
 
         /* Status bar */
         .cw-status-bar {
