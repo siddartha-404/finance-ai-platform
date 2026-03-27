@@ -13,6 +13,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import logging
+import re  # Added for AI action parsing
 
 # ── 1. LOGGING ────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -383,6 +384,7 @@ def get_analytics(
     }
 
 
+
 # ── 14. AI CHAT — Local Ollama ────────────────────────────────────────────────
 @app.post("/api/chat")
 def chat_with_ai(
@@ -391,13 +393,14 @@ def chat_with_ai(
 ):
     """
     Chatbot — uses local Ollama (llama3.2:1b).
-    Run: ollama serve  then  ollama run llama3.2:1b
+    Now includes an ultra-forgiving regex parsing for the 1B model.
     """
     # ── Pull live DB data ─────────────────────────────────────────────────────
     clients    = db.query(models.Client).all()
     portfolios = db.query(models.Portfolio).all()
     meetings   = db.query(models.Meeting).all()
     total_aum  = sum(p.value for p in portfolios)
+    today_date = datetime.utcnow().strftime('%Y-%m-%d')
 
     # ── Build per-client context ──────────────────────────────────────────────
     client_lines = []
@@ -419,29 +422,22 @@ def chat_with_ai(
 
     client_block = "\n".join(client_lines) if client_lines else "  (no clients registered yet)"
 
-    # ── System prompt — finance expert + firm data ────────────────────────────
-    system_prompt = f"""You are Pro Finance AI — an expert wealth management analyst and financial advisor.
+    # ── System prompt — Simplified for the 1B Model ───────────────────────────
+    system_prompt = f"""You are Pro Finance AI, a wealth management assistant.
 
-You have two roles:
-1. FIRM ANALYST: You have full access to this firm's live database shown below. Answer questions about clients, portfolios and meetings using this exact data.
-2. FINANCE EXPERT: You are deeply knowledgeable in personal finance, investing, portfolio theory, risk management, tax planning, retirement planning, stock markets, bonds, and economic concepts. Answer ANY finance question even if not related to the firm data.
+FIRM DATABASE:
+{client_block}
 
 RULES:
-- For firm questions (clients, portfolios, meetings) → use the database below ONLY.
-- For general finance questions → use your expert knowledge freely.
-- NEVER say "I can only answer about firm data" — you are a full finance expert.
-- NEVER invent client names, AUM values or meeting dates not in the database.
-- Use **bold** for key figures, bullet lists for multiple items.
-- Be concise. Max 300 words.
+1. Answer finance questions expertly.
+2. Use the FIRM DATABASE to answer questions about clients.
+3. BOOKING MEETINGS: If the user asks to book a meeting, DO NOT apologize and DO NOT explain your process. Say "I will schedule that." and append this EXACT line at the end:
+BOOK_MEETING | Client Name | YYYY-MM-DD HH:MM | Advisor Name
 
-━━━ LIVE FIRM DATABASE ━━━
-Date          : {datetime.utcnow().strftime("%d %B %Y")}
-Total Clients : {len(clients)}
-Total AUM     : ${total_aum:,.2f}
-Total Meetings: {len(meetings)}
-
-CLIENT DETAILS:
-{client_block}
+IMPORTANT FOR BOOKING:
+- If the user says "Sita", write exactly "Sita" in the tag. Do not invent last names.
+- Today is {today_date}. Calculate future dates accurately.
+- Default advisor is Admin.
 
 USER QUERY: {request.message}
 """
@@ -455,10 +451,9 @@ USER QUERY: {request.message}
                 "prompt": system_prompt,
                 "stream": False,
                 "options": {
-                    "temperature":    0.2,
+                    "temperature":    0.1,  # Lower temp to stop hallucinated names
                     "num_predict":    400,
                     "top_p":          0.9,
-                    "repeat_penalty": 1.1,
                 },
             },
             timeout=60,
@@ -472,6 +467,58 @@ USER QUERY: {request.message}
         if not reply:
             return {"reply": "⚠️ The AI model returned an empty response. Please try again."}
 
+        # ── INTERCEPT & EXECUTE AI ACTIONS (FORGIVING REGEX) ──────────────────
+        # This regex ignores missing brackets and just looks for the word BOOK_MEETING
+        match = re.search(r'BOOK_MEETING\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|>\]\n]+)', reply)
+        
+        if match:
+            client_name = match.group(1).strip()
+            dt_str      = match.group(2).strip()
+            advisor     = match.group(3).strip()
+
+            # Strip the raw command and any hallucinated apologies out of the reply
+            reply = re.sub(r'<*\[*BOOK_MEETING.*', '', reply, flags=re.IGNORECASE | re.DOTALL).strip()
+            if not reply or "error" in reply.lower():
+                reply = "I will schedule that for you."
+
+            # DB Lookup Logic — Super Forgiving
+            # 1. Try exact/partial match first
+            client = db.query(models.Client).filter(models.Client.name.ilike(f"%{client_name}%")).first()
+            
+            # 2. Fallback: If AI hallucinated a last name (e.g. "Sita Smith"), just search the first name "Sita"
+            if not client and " " in client_name:
+                first_name = client_name.split()[0]
+                client = db.query(models.Client).filter(models.Client.name.ilike(f"%{first_name}%")).first()
+            
+            if not client:
+                reply += f"\n\n⚠️ **Action Failed:** Could not book meeting. Client '{client_name}' not found in the database."
+            else:
+                try:
+                    # Clean the date string
+                    dt_str_clean = dt_str.replace("T", " ")
+                    if len(dt_str_clean) == 10: 
+                        dt_str_clean += " 09:00"
+                    
+                    try:
+                        parsed_dt = datetime.strptime(dt_str_clean[:16], "%Y-%m-%d %H:%M")
+                    except ValueError:
+                        parsed_dt = datetime.fromisoformat(dt_str)
+
+                    # Save to DB
+                    db_meeting = models.Meeting(
+                        client_id = client.id,
+                        datetime  = parsed_dt,
+                        advisor   = advisor,
+                    )
+                    db.add(db_meeting)
+                    db.commit()
+                    
+                    reply += f"\n\n✅ **Meeting Booked Successfully!**\nScheduled for **{client.name}** on **{parsed_dt.strftime('%d %b %Y at %H:%M')}** with **{advisor}**."
+                    
+                except Exception as e:
+                    logger.error(f"Date parsing failed for string '{dt_str}': {e}")
+                    reply += f"\n\n⚠️ **Action Failed:** Could not understand the time '{dt_str}'. Please tell me the exact date and time."
+
         return {"reply": reply}
 
     except requests.exceptions.ConnectionError:
@@ -479,11 +526,11 @@ USER QUERY: {request.message}
             "reply": (
                 "⚠️ **AI Offline** — cannot connect to Ollama on port 11434.\n\n"
                 "Run these commands in a terminal:\n"
-                "```\nollama serve\nollama run llama3.2:1b\n```"
+                "1) `ollama serve`\n"
+                "2) `ollama pull llama3.2:1b`\n"
+                "3) Restart this FastAPI server\n"
             )
         }
-    except requests.exceptions.Timeout:
-        return {"reply": "⚠️ **AI Timeout** — the model took too long. Try a shorter question or restart Ollama."}
-    except Exception as exc:
-        logger.error(f"AI chat error: {exc}")
-        return {"reply": f"⚠️ **Internal Error:** {exc}"}
+    except Exception as e:
+        logger.exception(f"Unexpected chat error: {e}")
+        return {"reply": "⚠️ Unexpected server error while generating AI response."}
