@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   MessageCircle, X, Send, Mic, MicOff, Paperclip,
   TrendingUp, Bot, Sparkles, FileText, Image, File,
+  Volume2, VolumeX // NEW: Added Volume icons for TTS toggle
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
@@ -59,13 +60,16 @@ export default function ChatWidget() {
     content:
       'Hello! I am your **Pro Finance AI Analyst**. My secure neural link is active.\n\n' +
       'Ask me about clients, portfolios, meetings, or any financial topic.\n\n' +
-      '🎤 You can also use **voice input** or **upload a file** to ask questions.',
+      '🎤 You can use **voice input** or **upload a file**. I will also speak my answers aloud!',
   }]);
   const [input,       setInput]       = useState('');
   const [isLoading,   setIsLoading]   = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [micError,    setMicError]    = useState('');
   const [attachment,  setAttachment]  = useState<{ name: string; type: string; text: string } | null>(null);
+  
+  // NEW: State to toggle Text-to-Speech output (Defaults to true for Hackathon wow-factor)
+  const [isVoiceOutputEnabled, setIsVoiceOutputEnabled] = useState(true);
 
   const bottomRef      = useRef<HTMLDivElement>(null);
   const fileInputRef   = useRef<HTMLInputElement>(null);
@@ -75,14 +79,41 @@ export default function ChatWidget() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isOpen]);
 
-  // Cleanup on unmount
+  // Cleanup on unmount (Stops recording AND stops speaking if widget is destroyed)
   useEffect(() => {
     return () => {
       if (recRef.current) {
         try { recRef.current.abort(); } catch { /* ignore */ }
       }
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
     };
   }, []);
+
+  // NEW: Text-to-Speech Helper Function
+  const speakText = (text: string) => {
+    if (!window.speechSynthesis || !isVoiceOutputEnabled) return;
+    
+    // Stop any ongoing speech before starting a new one
+    window.speechSynthesis.cancel();
+    
+    // Clean the text: remove markdown symbols (*, #, _, `) so the AI doesn't say "asterisk"
+    let cleanText = text.replace(/[*#_`~]/g, '');
+    // Remove navigation commands from spoken text
+    cleanText = cleanText.replace(/🧭NAV:[a-z]+/g, '');
+    // Remove common emojis for cleaner speech flow
+    cleanText = cleanText.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+    
+    if (!cleanText.trim()) return;
+
+    const utterance = new SpeechSynthesisUtterance(cleanText.trim());
+    utterance.rate = 1.0;  // Adjust speed if needed (1.0 is normal)
+    utterance.pitch = 1.0; 
+    utterance.lang = 'en-US';
+    
+    window.speechSynthesis.speak(utterance);
+  };
 
   const toggleMic = () => {
     if (isListening) {
@@ -100,6 +131,9 @@ export default function ChatWidget() {
       setTimeout(() => setMicError(''), 4000);
       return;
     }
+
+    // NEW: Stop AI from talking when user starts dictating
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
 
     const rec = new SR();
     recRef.current = rec;
@@ -252,6 +286,9 @@ export default function ChatWidget() {
       setIsListening(false);
     }
 
+    // Stop speaking when user sends a new message
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
     const fileContent = attachment?.text
       ? attachment.text.slice(0, 1500) + (attachment.text.length > 1500 ? '\n...[truncated for speed]' : '')
       : '';
@@ -265,7 +302,6 @@ export default function ChatWidget() {
     };
     const thinkId = `think-${Date.now()}`;
 
-    // NEW: Capture history to send to backend, filtering out 'thinking' states
     const historyToSend = messages
       .filter(m => m.type === 'user' || m.type === 'ai')
       .map(m => ({
@@ -286,7 +322,6 @@ export default function ChatWidget() {
       const res = await fetch('http://localhost:8000/api/chat', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        // NEW: Include history alongside the current message
         body:    JSON.stringify({ 
           message: fullMessage,
           history: historyToSend
@@ -316,24 +351,36 @@ export default function ChatWidget() {
         { id: thinkId, type: 'ai', content: finalReply },
       ]);
 
+      // NEW: Trigger Text-to-Speech playback of the final reply
+      speakText(finalReply);
+
       if (finalReply.includes('✅') || finalReply.includes('🗑️')) {
         window.dispatchEvent(new Event('db-updated'));
       }
 
     } catch (err: any) {
       const isTimeout = err?.name === 'AbortError';
+      const errorMsg = isTimeout
+        ? '⚠️ AI is taking too long. Try a shorter question.'
+        : '⚠️ Connection Error. Please check the backend.';
+        
       setMessages(prev => [
         ...prev.filter(m => m.id !== thinkId),
-        {
-          id: thinkId, type: 'ai',
-          content: isTimeout
-            ? '⚠️ **AI is taking too long.**\n\nTry:\n- Ask a shorter question\n- Upload a smaller file'
-            : '⚠️ **Connection Error** — ensure the backend is running on port 8000.',
-        },
+        { id: thinkId, type: 'ai', content: errorMsg },
       ]);
+      speakText(errorMsg);
+      
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // NEW: Handler to toggle voice output
+  const toggleVoiceOutput = () => {
+    if (isVoiceOutputEnabled && window.speechSynthesis) {
+      window.speechSynthesis.cancel(); // Stop talking immediately if muted
+    }
+    setIsVoiceOutputEnabled(!isVoiceOutputEnabled);
   };
 
   // ── Render ────────────────────────────────────────────────────
@@ -363,9 +410,23 @@ export default function ChatWidget() {
                 </div>
               </div>
             </div>
-            <button type="button" className="cw-close-btn" onClick={() => setIsOpen(false)}>
-              <X size={16} />
-            </button>
+            
+            {/* NEW: Added a volume toggle and grouped it with the close button */}
+            <div className="cw-header-actions" style={{ display: 'flex', gap: '0.5rem' }}>
+              <button 
+                type="button" 
+                className={`cw-icon-btn ${isVoiceOutputEnabled ? 'cw-voice-active' : ''}`} 
+                onClick={toggleVoiceOutput}
+                title={isVoiceOutputEnabled ? "Mute AI Voice" : "Unmute AI Voice"}
+                style={{ padding: '0.375rem', borderRadius: '0.5rem', background: isVoiceOutputEnabled ? 'rgba(16,185,129,.15)' : 'rgba(255,255,255,.06)', border: '1px solid rgba(255,255,255,.1)' }}
+              >
+                {isVoiceOutputEnabled ? <Volume2 size={16} color="#10b981" /> : <VolumeX size={16} color="#94a3b8" />}
+              </button>
+              
+              <button type="button" className="cw-close-btn" onClick={() => setIsOpen(false)}>
+                <X size={16} />
+              </button>
+            </div>
           </div>
 
           <div className="cw-messages">
@@ -514,8 +575,9 @@ export default function ChatWidget() {
           background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1);
           border-radius:.5rem; padding:.375rem; cursor:pointer; color:#94a3b8;
           display:flex; align-items:center; justify-content:center;
+          transition:all 0.2s;
         }
-        .cw-close-btn:hover { color:#fff; }
+        .cw-close-btn:hover { color:#fff; background:rgba(255,255,255,.1); }
 
         /* Messages */
         .cw-messages {
