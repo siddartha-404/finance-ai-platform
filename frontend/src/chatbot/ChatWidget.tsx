@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
@@ -85,9 +84,7 @@ export default function ChatWidget() {
     };
   }, []);
 
-  // ── EXACT WORKING Mic toggle from your previous code ──────────
   const toggleMic = () => {
-    // ── STOP ─────────────────────────────────────────────────
     if (isListening) {
       if (recRef.current) {
         try { recRef.current.stop(); } catch { /* ignore */ }
@@ -97,7 +94,6 @@ export default function ChatWidget() {
       return;
     }
 
-    // ── START ─────────────────────────────────────────────────
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       setMicError('Voice input not supported. Use Chrome or Edge.');
@@ -108,8 +104,6 @@ export default function ChatWidget() {
     const rec = new SR();
     recRef.current = rec;
 
-    // This is the working logic: wait for the user to finish speaking, 
-    // then process all text perfectly at once.
     rec.lang            = 'en-US';
     rec.continuous      = false;
     rec.interimResults  = false;
@@ -123,7 +117,6 @@ export default function ChatWidget() {
     rec.onresult = (event: any) => {
       const transcript = event.results[0][0].transcript.trim();
       if (transcript) {
-        // Append to existing input (in case user already typed something)
         setInput(prev => {
           const existing = prev.trim();
           return existing ? `${existing} ${transcript}` : transcript;
@@ -136,7 +129,7 @@ export default function ChatWidget() {
     rec.onerror = (event: any) => {
       setIsListening(false);
       recRef.current = null;
-      if (event.error === 'aborted') return; // user stopped — no error needed
+      if (event.error === 'aborted') return;
       if (event.error === 'not-allowed' || event.error === 'permission-denied') {
         setMicError('Microphone access denied. Allow mic in browser settings.');
       } else if (event.error === 'no-speech') {
@@ -152,7 +145,6 @@ export default function ChatWidget() {
     };
 
     rec.onend = () => {
-      // Always reset state when recognition ends for any reason
       setIsListening(false);
       recRef.current = null;
     };
@@ -167,7 +159,6 @@ export default function ChatWidget() {
     }
   };
 
-  // ── File upload ───────────────────────────────────────────────
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -256,7 +247,6 @@ export default function ChatWidget() {
     const text = input.trim();
     if (!text || isLoading) return;
 
-    // Stop mic if still active
     if (isListening) {
       if (recRef.current) { try { recRef.current.stop(); } catch { /* ignore */ } recRef.current = null; }
       setIsListening(false);
@@ -275,6 +265,14 @@ export default function ChatWidget() {
     };
     const thinkId = `think-${Date.now()}`;
 
+    // NEW: Capture history to send to backend, filtering out 'thinking' states
+    const historyToSend = messages
+      .filter(m => m.type === 'user' || m.type === 'ai')
+      .map(m => ({
+        role: m.type,
+        content: m.content || ''
+      }));
+
     setMessages(prev => [...prev, userMsg, { id: thinkId, type: 'thinking' }]);
     setInput('');
     setAttachment(null);
@@ -283,14 +281,16 @@ export default function ChatWidget() {
     try {
       const token      = localStorage.getItem('token') || '';
       const controller = new AbortController();
-      
-      // Increased timeout to 150 seconds
       const tid        = setTimeout(() => controller.abort(), 150000); 
       
       const res = await fetch('http://localhost:8000/api/chat', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body:    JSON.stringify({ message: fullMessage }),
+        // NEW: Include history alongside the current message
+        body:    JSON.stringify({ 
+          message: fullMessage,
+          history: historyToSend
+        }),
         signal:  controller.signal,
       });
       clearTimeout(tid);
@@ -300,7 +300,6 @@ export default function ChatWidget() {
       setMessages(prev => prev.map(m => m.id === thinkId ? { ...m, resolved: true } : m));
       await new Promise(r => setTimeout(r, 200));
 
-      // --- NEW: Handle Navigation Marker ---
       let finalReply = reply;
       const navMatch = finalReply.match(/🧭NAV:([a-z]+)/);
       if (navMatch) {
@@ -309,7 +308,6 @@ export default function ChatWidget() {
         if (paths[page]) {
           navigate(paths[page]);
         }
-        // Remove the ugly tag from the text the user sees
         finalReply = finalReply.replace(/🧭NAV:[a-z]+/, '').trim();
       }
 
@@ -318,7 +316,6 @@ export default function ChatWidget() {
         { id: thinkId, type: 'ai', content: finalReply },
       ]);
 
-      // Dispatch event to trigger frontend reload if AI confirms action
       if (finalReply.includes('✅') || finalReply.includes('🗑️')) {
         window.dispatchEvent(new Event('db-updated'));
       }
@@ -349,11 +346,8 @@ export default function ChatWidget() {
         onChange={handleFileSelect}
       />
 
-      {/* ── Chat window ──────────────────────────────────────── */}
       {isOpen && (
         <div className="cw-window">
-
-          {/* Header */}
           <div className="cw-header">
             <div className="cw-header-left">
               <div className="cw-header-avatar">
@@ -374,7 +368,6 @@ export default function ChatWidget() {
             </button>
           </div>
 
-          {/* Messages */}
           <div className="cw-messages">
             {messages.map(m => {
               if (m.type === 'thinking' && !m.resolved) return <ThinkingBubble key={m.id} />;
@@ -413,7 +406,6 @@ export default function ChatWidget() {
             <div ref={bottomRef} />
           </div>
 
-          {/* Status bar */}
           {(micError || isListening) && (
             <div className={`cw-status-bar ${isListening ? 'cw-status-bar-listening' : 'cw-status-bar-error'}`}>
               {isListening ? (
@@ -425,7 +417,6 @@ export default function ChatWidget() {
             </div>
           )}
 
-          {/* Attachment preview */}
           {attachment && (
             <div className="cw-attach-preview">
               <FileIcon mime={attachment.type} />
@@ -436,11 +427,8 @@ export default function ChatWidget() {
             </div>
           )}
 
-          {/* Input row */}
           <div className="cw-input-area">
             <div className={`cw-input-row ${isListening ? 'cw-input-row-active' : ''}`}>
-
-              {/* Mic toggle */}
               <button
                 type="button"
                 className={`cw-icon-btn ${isListening ? 'cw-icon-btn-mic-active' : ''}`}
@@ -458,7 +446,6 @@ export default function ChatWidget() {
                 placeholder={isListening ? '🔴 Listening — speak now…' : 'Ask me anything…'}
               />
 
-              {/* File upload */}
               <button
                 type="button"
                 className={`cw-icon-btn ${attachment ? 'cw-icon-btn-active' : ''}`}
@@ -468,7 +455,6 @@ export default function ChatWidget() {
                 <Paperclip size={16} />
               </button>
 
-              {/* Send */}
               <button
                 type="button"
                 onClick={send}
@@ -483,7 +469,6 @@ export default function ChatWidget() {
         </div>
       )}
 
-      {/* ── FAB ──────────────────────────────────────────────── */}
       <div className="cw-fab-wrap">
         {!isOpen && <span className="cw-ping" />}
         <button
@@ -495,7 +480,6 @@ export default function ChatWidget() {
         </button>
       </div>
 
-      {/* ── Styles ───────────────────────────────────────────── */}
       <style>{`
         .cw-window {
           position:fixed; bottom:5.5rem; right:2rem;

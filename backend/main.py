@@ -13,6 +13,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import logging
+from typing import List, Optional
 
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -76,7 +77,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 # ── 5. PYDANTIC SCHEMAS & SERIALISERS ─────────────────────────────────────────
 class Token(BaseModel): access_token: str; token_type: str; username: str; role: str
-class ChatRequest(BaseModel): message: str
+
+# NEW: Added schema for handling conversation history
+class MessageHistory(BaseModel): 
+    role: str
+    content: str
+
+class ChatRequest(BaseModel): 
+    message: str
+    history: Optional[List[MessageHistory]] = []
+
 class ClientCreate(BaseModel): name: str; email: str; phone: str; investment_profile: str
 class PortfolioCreate(BaseModel): client_id: int; assets: str; value: float; risk_score: float
 class MeetingCreate(BaseModel): client_id: int; datetime: str; advisor: str
@@ -169,7 +179,7 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
     {client_block}
     
     RULES:
-    1. Answer finance questions expertly.
+    1. Answer finance questions expertly and maintain context from the user's previous messages.
     2. Read data directly from the FIRM DATABASE.
     3. Use tools to Create, Update, or Delete records when requested.
     4. STRICT BOOKING RULE: If the user asks to book a meeting but does NOT specify exact date, time, and advisor, DO NOT use the tool yet. Ask them to clarify the missing details.
@@ -181,9 +191,13 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
     create_portfolio_tool = {"function_declarations": [{"name": "create_portfolio", "description": "Create portfolio.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string"}, "assets": {"type": "string", "description": "Calculate allocation based on risk_score (1-10). e.g., '90% Stocks, 10% Bonds'"}, "value": {"type": "number"}, "risk_score": {"type": "number"}}, "required": ["client_name", "assets", "value", "risk_score"]}}]}
     update_client_tool = {"function_declarations": [{"name": "update_client", "description": "Update an existing client's details.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string"}, "new_email": {"type": "string"}, "new_phone": {"type": "string"}, "new_profile": {"type": "string"}}, "required": ["client_name"]}}]}
     delete_record_tool = {"function_declarations": [{"name": "delete_record", "description": "Delete a client, meeting, or portfolio.", "parameters": {"type": "object", "properties": {"client_name": {"type": "string"}, "record_type": {"type": "string", "description": "Must be 'Client', 'Portfolio', or 'Meeting'"}}, "required": ["client_name", "record_type"]}}]}
-    
-    # NEW TOOL: UI Navigation
     navigate_ui_tool = {"function_declarations": [{"name": "navigate_ui", "description": "Navigate the user's screen to a specific page.", "parameters": {"type": "object", "properties": {"page": {"type": "string", "description": "Allowed values: dashboard, clients, portfolios, services, meetings"}}, "required": ["page"]}}]}
+
+    # NEW: Format history for Gemini API
+    formatted_history = []
+    for msg in request.history:
+        role = "model" if msg.role == "ai" else "user"
+        formatted_history.append({"role": role, "parts": [msg.content]})
 
     try:
         model = genai.GenerativeModel(
@@ -192,7 +206,9 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
             tools=[book_meeting_tool, register_client_tool, create_portfolio_tool, update_client_tool, delete_record_tool, navigate_ui_tool]
         )
 
-        response = model.generate_content(request.message)
+        # NEW: Initialize chat session with history instead of standalone generate_content
+        chat_session = model.start_chat(history=formatted_history)
+        response = chat_session.send_message(request.message)
         
         if response.candidates and response.candidates[0].content.parts:
             part = response.candidates[0].content.parts[0]
@@ -201,12 +217,10 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
                 fc = part.function_call
                 args = fc.args
                 
-                # --- NEW: Routing Action ---
                 if fc.name == "navigate_ui":
                     page = args.get("page", "dashboard").lower()
                     return {"reply": f"Taking you to the {page.capitalize()} page! 🧭NAV:{page}"}
 
-                # --- Database Actions ---
                 client_name = args.get("client_name", "")
                 client = db.query(models.Client).filter(models.Client.name.ilike(f"%{client_name}%")).first()
                 if not client and " " in client_name:
@@ -246,7 +260,6 @@ def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
                     r_type = args.get("record_type")
                     
                     if r_type == "Client":
-                        # FIX: Cascading Deletes - Delete orphaned records first!
                         db.query(models.Portfolio).filter(models.Portfolio.client_id == client.id).delete()
                         db.query(models.Meeting).filter(models.Meeting.client_id == client.id).delete()
                         db.delete(client)

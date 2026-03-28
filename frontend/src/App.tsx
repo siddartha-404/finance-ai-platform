@@ -27,7 +27,6 @@ const apiFetch = async (url: string, options: RequestInit = {}): Promise<Respons
     },
   });
   if (res.status === 401) {
-    // Token expired or invalid — clear storage and force re-login
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     if (_forceLogout) _forceLogout();
@@ -178,29 +177,14 @@ const Sidebar: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// HEADER
+// CLEAN HEADER
 // ─────────────────────────────────────────────────────────────
-const Header: React.FC<{ username: string }> = ({ username }) => (
-  <header className="sticky top-0 z-20 h-16 flex items-center justify-between px-6 border-b border-white/10 bg-slate-900/60 backdrop-blur-2xl">
-    <div className="flex-1 max-w-md">
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-        <input type="text" placeholder="Search records…"
-          className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50" />
-      </div>
-    </div>
-    <div className="flex items-center gap-4 px-4">
-      <Bell className="w-5 h-5 text-slate-400 cursor-pointer hover:text-white transition-colors" />
-      <div className="flex items-center gap-3 pl-4 border-l border-white/10">
-        <div className="w-9 h-9 rounded-full bg-emerald-500 flex items-center justify-center font-bold text-white text-sm">
-          {username.charAt(0).toUpperCase()}
-        </div>
-        <div className="hidden sm:block">
-          <p className="text-sm font-medium text-white">{username}</p>
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Admin Panel</p>
-        </div>
-      </div>
-    </div>
+const Header: React.FC = () => (
+  <header className="sticky top-0 z-20 h-16 flex items-center px-8 border-b border-white/10 bg-slate-900/60 backdrop-blur-2xl shadow-sm">
+    <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-3">
+      <TrendingUp className="w-6 h-6 text-emerald-400" />
+      Pro Finance AI
+    </h1>
   </header>
 );
 
@@ -759,7 +743,6 @@ export default function App() {
     setToken(null); setUser(null);
   }, []);
 
-  // Register the logout callback for the global apiFetch 401 handler
   useEffect(() => {
     _forceLogout = handleLogout;
     return () => { _forceLogout = null; };
@@ -772,7 +755,7 @@ export default function App() {
       <div className="flex min-h-screen font-sans bg-[#0f172a]">
         <Sidebar onLogout={handleLogout} />
         <div className="flex-1 flex flex-col ml-64">
-          <Header username={user || 'Admin'} />
+          <Header />
           <main className="flex-1 p-6 overflow-y-auto">
             <Routes>
               <Route path="/"           element={<DashboardHome />} />
