@@ -1,9 +1,9 @@
-# Chatbot - Text And Voice Agents
+# Finance ai assistant 
 
 ## Tech Stack
 - **Frontend:** React, Vite, TypeScript, Tailwind CSS
 - **Backend:** FastAPI, SQLAlchemy, PostgreSQL
-- **AI:** Llama 3.2 (Local via Ollama)
+- **AI:** Gemini 2.5 flash
 
 ## Setup
 1. Run the backend: `uvicorn main:app --reload`
